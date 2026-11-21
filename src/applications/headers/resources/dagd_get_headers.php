@@ -65,6 +65,16 @@ class DaGdHeaderGetter {
     curl_setopt($this->curl, CURLOPT_VERBOSE, true);
     curl_setopt($this->curl, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($this->curl, CURLOPT_HEADER, true);
+    if (defined('CURLOPT_PROTOCOLS')) {
+      curl_setopt(
+        $this->curl,
+        CURLOPT_PROTOCOLS,
+        CURLPROTO_HTTP | CURLPROTO_HTTPS);
+      curl_setopt(
+        $this->curl,
+        CURLOPT_REDIR_PROTOCOLS,
+        CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    }
     curl_setopt($this->curl, CURLOPT_FOLLOWLOCATION, false);
     return $this;
   }
@@ -89,6 +99,10 @@ class DaGdHeaderGetter {
       $redirects = $this->max_redirects;
     }
     for ($i = 0; $i < $redirects; $i++) {
+      $target = !empty($redirect_to) ? $redirect_to : $this->site;
+      if (!$this->isAllowedUrl($target)) {
+        break;
+      }
       $this->createClient($redirect_to);
       $out = curl_exec($this->curl);
       if (empty($out)) {
@@ -107,6 +121,49 @@ class DaGdHeaderGetter {
       }
     }
     return $results;
+  }
+
+  // Reject URLs that target the loopback interface, link-local addresses
+  // (including cloud metadata endpoints), or private/reserved ranges, and
+  // anything that is not plain HTTP(S). This runs for the initial request
+  // and for every redirect hop.
+  protected function isAllowedUrl($url) {
+    $parts = parse_url($url);
+    if ($parts === false || empty($parts['host'])) {
+      return false;
+    }
+    $scheme = isset($parts['scheme']) ? strtolower($parts['scheme']) : '';
+    if ($scheme !== 'http' && $scheme !== 'https') {
+      return false;
+    }
+    $host = trim($parts['host'], '[]');
+    $ips = array();
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+      $ips[] = $host;
+    } else {
+      $records = @dns_get_record($host, DNS_A + DNS_AAAA);
+      if (is_array($records)) {
+        foreach ($records as $record) {
+          if (!empty($record['ip'])) {
+            $ips[] = $record['ip'];
+          } elseif (!empty($record['ipv6'])) {
+            $ips[] = $record['ipv6'];
+          }
+        }
+      }
+    }
+    if (empty($ips)) {
+      return false;
+    }
+    foreach ($ips as $ip) {
+      if (!filter_var(
+            $ip,
+            FILTER_VALIDATE_IP,
+            FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // This function is uncached because we are only requesting the value of one
